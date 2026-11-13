@@ -1,6 +1,8 @@
 using MarksApi.Data;
+using MarksApi.Data.Entities;
 using MarksApi.Dtos;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace MarksApi.Services;
 
@@ -81,4 +83,93 @@ public class StudentService : IStudentService
             })
             .FirstOrDefaultAsync(cancellationToken);
     }
+
+    public async Task<StudentResponse> CreateAsync(StudentWriteRequest request, CancellationToken cancellationToken)
+    {
+        var student = new Student
+        {
+            RegistrationNo = request.RegistrationNo!.Trim(),
+            FullName = request.FullName!.Trim(),
+            Email = request.Email!.Trim().ToLowerInvariant(),
+            CreatedAtUtc = DateTime.UtcNow
+        };
+        _db.Students.Add(student);
+        await SaveAsync(cancellationToken);
+        return ToResponse(student);
+    }
+
+    public async Task<StudentResponse?> UpdateAsync(int id, StudentWriteRequest request, CancellationToken cancellationToken)
+    {
+        var student = await _db.Students.FirstOrDefaultAsync(row => row.Id == id, cancellationToken);
+        if (student is null)
+        {
+            return null;
+        }
+
+        student.RegistrationNo = request.RegistrationNo!.Trim();
+        student.FullName = request.FullName!.Trim();
+        student.Email = request.Email!.Trim().ToLowerInvariant();
+        await SaveAsync(cancellationToken);
+        return ToResponse(student);
+    }
+
+    public async Task<bool> DeleteAsync(int id, CancellationToken cancellationToken)
+    {
+        var student = await _db.Students.FirstOrDefaultAsync(row => row.Id == id, cancellationToken);
+        if (student is null)
+        {
+            return false;
+        }
+
+        _db.Students.Remove(student);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsPostgres(exception, PostgresErrorCodes.ForeignKeyViolation))
+        {
+            throw new StudentConflictException("Student has enrollments", "A student who is enrolled in a course cannot be deleted.");
+        }
+
+        return true;
+    }
+
+    private async Task SaveAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsPostgres(exception, PostgresErrorCodes.UniqueViolation))
+        {
+            throw new StudentConflictException("Duplicate student", "A student with this registration number or email already exists.");
+        }
+    }
+
+    private static bool IsPostgres(DbUpdateException exception, string code)
+    {
+        return exception.InnerException is PostgresException postgres && postgres.SqlState == code;
+    }
+
+    private static StudentResponse ToResponse(Student student)
+    {
+        return new StudentResponse
+        {
+            Id = student.Id,
+            RegistrationNo = student.RegistrationNo,
+            FullName = student.FullName,
+            Email = student.Email
+        };
+    }
+}
+
+public class StudentConflictException : Exception
+{
+    public StudentConflictException(string title, string detail)
+        : base(detail)
+    {
+        Title = title;
+    }
+
+    public string Title { get; }
 }

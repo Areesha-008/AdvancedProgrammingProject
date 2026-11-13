@@ -122,6 +122,85 @@ app.MapGet("/api/students/{id:int}", async (int id, ClaimsPrincipal user, IStude
     return Results.Ok(student);
 }).RequireAuthorization();
 
+app.MapPost("/api/students", async (StudentWriteRequest request, IStudentService students, CancellationToken cancellationToken) =>
+{
+    var invalid = InvalidStudent(request);
+    if (invalid is not null)
+    {
+        return invalid;
+    }
+
+    try
+    {
+        var created = await students.CreateAsync(request, cancellationToken);
+        return Results.Created($"/api/students/{created.Id}", created);
+    }
+    catch (StudentConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapPut("/api/students/{id:int}", async (int id, StudentWriteRequest request, IStudentService students, CancellationToken cancellationToken) =>
+{
+    var invalid = InvalidStudent(request);
+    if (invalid is not null)
+    {
+        return invalid;
+    }
+
+    try
+    {
+        var updated = await students.UpdateAsync(id, request, cancellationToken);
+        return updated is null
+            ? Results.Problem(title: "Student not found", detail: "No student with this id exists.", statusCode: StatusCodes.Status404NotFound)
+            : Results.Ok(updated);
+    }
+    catch (StudentConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapDelete("/api/students/{id:int}", async (int id, IStudentService students, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var deleted = await students.DeleteAsync(id, cancellationToken);
+        return deleted
+            ? Results.NoContent()
+            : Results.Problem(title: "Student not found", detail: "No student with this id exists.", statusCode: StatusCodes.Status404NotFound);
+    }
+    catch (StudentConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
 app.MapGet("/", () => "Hello World!");
+
+static IResult? InvalidStudent(StudentWriteRequest request)
+{
+    var errors = new Dictionary<string, string[]>();
+    if (string.IsNullOrWhiteSpace(request.RegistrationNo) || request.RegistrationNo.Trim().Length > 20)
+    {
+        errors["registrationNo"] = ["Registration number is required and must be at most 20 characters."];
+    }
+    if (string.IsNullOrWhiteSpace(request.FullName) || request.FullName.Trim().Length > 100)
+    {
+        errors["fullName"] = ["Full name is required and must be at most 100 characters."];
+    }
+    if (string.IsNullOrWhiteSpace(request.Email) || request.Email.Trim().Length > 150 || !request.Email.Contains('@'))
+    {
+        errors["email"] = ["A valid email is required and must be at most 150 characters."];
+    }
+
+    return errors.Count == 0 ? null : Results.ValidationProblem(errors);
+}
+
+static IResult Conflict(StudentConflictException exception)
+{
+    return Results.Problem(title: exception.Title, detail: exception.Message, statusCode: StatusCodes.Status409Conflict);
+}
 
 app.Run();
