@@ -12,6 +12,8 @@ if (string.IsNullOrWhiteSpace(connectionString))
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connectionString).UseSnakeCaseNamingConvention());
 
+builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>("database");
+
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
@@ -19,6 +21,8 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await DbSeeder.SeedAsync(db, app.Configuration, CancellationToken.None);
 }
+
+app.MapHealthChecks("/health");
 
 app.MapGet("/", () => "Hello World!");
 
