@@ -6,6 +6,8 @@ using MarksApi.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Security.Claims;
+using Microsoft.OpenApi.Models;
+using Swashbuckle.AspNetCore.SwaggerUI;
 var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("Database");
@@ -27,6 +29,28 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>("database");
 
 builder.Services.AddProblemDetails();
+var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AppCors", policy => policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod());
+});
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo { Title = "Marks API", Version = "v1" });
+    var scheme = new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
+    };
+    options.AddSecurityDefinition("Bearer", scheme);
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement { [scheme] = [] });
+});
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -50,9 +74,15 @@ builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
 
 
 var app = builder.Build();
-
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseHttpsRedirection();
+app.UseCors("AppCors");
 app.UseAuthentication();
 app.UseAuthorization();
 
