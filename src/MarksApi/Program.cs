@@ -45,6 +45,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IStudentService, StudentService>();
+builder.Services.AddScoped<ICourseService, CourseService>();
+builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
 
 
 var app = builder.Build();
@@ -98,16 +100,10 @@ app.MapGet("/api/students", async (int? page, int? pageSize, string? search, str
 
 app.MapGet("/api/students/{id:int}", async (int id, ClaimsPrincipal user, IStudentService students, CancellationToken cancellationToken) =>
 {
-    if (user.IsInRole("Student"))
+    var forbidden = OwnStudentOnly(user, id, "You can only view your own student record.");
+    if (forbidden is not null)
     {
-        var ownId = user.FindFirst("studentId")?.Value;
-        if (ownId != id.ToString())
-        {
-            return Results.Problem(
-                title: "Forbidden",
-                detail: "You can only view your own student record.",
-                statusCode: StatusCodes.Status403Forbidden);
-        }
+        return forbidden;
     }
 
     var student = await students.GetAsync(id, cancellationToken);
@@ -135,7 +131,7 @@ app.MapPost("/api/students", async (StudentWriteRequest request, IStudentService
         var created = await students.CreateAsync(request, cancellationToken);
         return Results.Created($"/api/students/{created.Id}", created);
     }
-    catch (StudentConflictException exception)
+    catch (ApiConflictException exception)
     {
         return Conflict(exception);
     }
@@ -156,7 +152,7 @@ app.MapPut("/api/students/{id:int}", async (int id, StudentWriteRequest request,
             ? Results.Problem(title: "Student not found", detail: "No student with this id exists.", statusCode: StatusCodes.Status404NotFound)
             : Results.Ok(updated);
     }
-    catch (StudentConflictException exception)
+    catch (ApiConflictException exception)
     {
         return Conflict(exception);
     }
@@ -171,11 +167,152 @@ app.MapDelete("/api/students/{id:int}", async (int id, IStudentService students,
             ? Results.NoContent()
             : Results.Problem(title: "Student not found", detail: "No student with this id exists.", statusCode: StatusCodes.Status404NotFound);
     }
-    catch (StudentConflictException exception)
+    catch (ApiConflictException exception)
     {
         return Conflict(exception);
     }
 }).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapGet("/api/courses", async (int? page, int? pageSize, string? search, string? sort, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    return Results.Ok(await courses.ListAsync(page ?? 1, pageSize ?? 10, search, sort, cancellationToken));
+}).RequireAuthorization();
+
+app.MapGet("/api/courses/{id:int}", async (int id, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    var course = await courses.GetAsync(id, cancellationToken);
+    return course is null
+        ? Results.Problem(title: "Course not found", detail: "No course with this id exists.", statusCode: StatusCodes.Status404NotFound)
+        : Results.Ok(course);
+}).RequireAuthorization();
+
+app.MapPost("/api/courses", async (CourseWriteRequest request, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    var invalid = InvalidCourse(request);
+    if (invalid is not null)
+    {
+        return invalid;
+    }
+
+    try
+    {
+        var created = await courses.CreateAsync(request, cancellationToken);
+        return Results.Created($"/api/courses/{created.Id}", created);
+    }
+    catch (ApiConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapPut("/api/courses/{id:int}", async (int id, CourseWriteRequest request, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    var invalid = InvalidCourse(request);
+    if (invalid is not null)
+    {
+        return invalid;
+    }
+
+    try
+    {
+        var updated = await courses.UpdateAsync(id, request, cancellationToken);
+        return updated is null
+            ? Results.Problem(title: "Course not found", detail: "No course with this id exists.", statusCode: StatusCodes.Status404NotFound)
+            : Results.Ok(updated);
+    }
+    catch (ApiConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapDelete("/api/courses/{id:int}", async (int id, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var deleted = await courses.DeleteAsync(id, cancellationToken);
+        return deleted
+            ? Results.NoContent()
+            : Results.Problem(title: "Course not found", detail: "No course with this id exists.", statusCode: StatusCodes.Status404NotFound);
+    }
+    catch (ApiConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapPost("/api/courses/{courseId:int}/enrollments", async (int courseId, EnrollRequest request, IEnrollmentService enrollments, CancellationToken cancellationToken) =>
+{
+    if (request.StudentId is null or < 1)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["studentId"] = ["Student id is required."] });
+    }
+
+    try
+    {
+        var created = await enrollments.EnrollAsync(courseId, request.StudentId.Value, cancellationToken);
+        return Results.Created($"/api/enrollments/{created.Id}", created);
+    }
+    catch (ApiNotFoundException exception)
+    {
+        return Results.Problem(title: "Not found", detail: exception.Message, statusCode: StatusCodes.Status404NotFound);
+    }
+    catch (ApiConflictException exception)
+    {
+        return Conflict(exception);
+    }
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapGet("/api/courses/{courseId:int}/enrollments", async (int courseId, int? page, int? pageSize, string? search, string? sort, IEnrollmentService enrollments, CancellationToken cancellationToken) =>
+{
+    var result = await enrollments.ListAsync(courseId, page ?? 1, pageSize ?? 10, search, sort, cancellationToken);
+    return result is null
+        ? Results.Problem(title: "Course not found", detail: "No course with this id exists.", statusCode: StatusCodes.Status404NotFound)
+        : Results.Ok(result);
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapPut("/api/enrollments/{id:int}/mark", async (int id, MarkRequest request, IEnrollmentService enrollments, CancellationToken cancellationToken) =>
+{
+    if (request.Mark is null or < 0 or > 100)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["mark"] = ["Mark must be a whole number from 0 to 100."] });
+    }
+
+    var updated = await enrollments.UpdateMarkAsync(id, request.Mark.Value, cancellationToken);
+    return updated is null
+        ? Results.Problem(title: "Enrollment not found", detail: "No enrollment with this id exists.", statusCode: StatusCodes.Status404NotFound)
+        : Results.Ok(updated);
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapDelete("/api/enrollments/{id:int}", async (int id, IEnrollmentService enrollments, CancellationToken cancellationToken) =>
+{
+    var deleted = await enrollments.DeleteAsync(id, cancellationToken);
+    return deleted
+        ? Results.NoContent()
+        : Results.Problem(title: "Enrollment not found", detail: "No enrollment with this id exists.", statusCode: StatusCodes.Status404NotFound);
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapGet("/api/courses/{id:int}/stats", async (int id, ICourseService courses, CancellationToken cancellationToken) =>
+{
+    var stats = await courses.GetStatsAsync(id, cancellationToken);
+    return stats is null
+        ? Results.Problem(title: "Course not found", detail: "No course with this id exists.", statusCode: StatusCodes.Status404NotFound)
+        : Results.Ok(stats);
+}).RequireAuthorization(policy => policy.RequireRole("Teacher"));
+
+app.MapGet("/api/students/{id:int}/transcript", async (int id, ClaimsPrincipal user, IStudentService students, CancellationToken cancellationToken) =>
+{
+    var forbidden = OwnStudentOnly(user, id, "You can only view your own transcript.");
+    if (forbidden is not null)
+    {
+        return forbidden;
+    }
+
+    var transcript = await students.GetTranscriptAsync(id, cancellationToken);
+    return transcript is null
+        ? Results.Problem(title: "Student not found", detail: "No student with this id exists.", statusCode: StatusCodes.Status404NotFound)
+        : Results.Ok(transcript);
+}).RequireAuthorization();
 
 app.MapGet("/", () => "Hello World!");
 
@@ -198,7 +335,38 @@ static IResult? InvalidStudent(StudentWriteRequest request)
     return errors.Count == 0 ? null : Results.ValidationProblem(errors);
 }
 
-static IResult Conflict(StudentConflictException exception)
+static IResult? OwnStudentOnly(ClaimsPrincipal user, int id, string detail)
+{
+    if (!user.IsInRole("Student"))
+    {
+        return null;
+    }
+
+    return user.FindFirst("studentId")?.Value == id.ToString()
+        ? null
+        : Results.Problem(title: "Forbidden", detail: detail, statusCode: StatusCodes.Status403Forbidden);
+}
+
+static IResult? InvalidCourse(CourseWriteRequest request)
+{
+    var errors = new Dictionary<string, string[]>();
+    if (string.IsNullOrWhiteSpace(request.Code) || request.Code.Trim().Length > 10)
+    {
+        errors["code"] = ["Course code is required and must be at most 10 characters."];
+    }
+    if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 150)
+    {
+        errors["title"] = ["Title is required and must be at most 150 characters."];
+    }
+    if (request.CreditHours is null or < 1 or > 4)
+    {
+        errors["creditHours"] = ["Credit hours must be a whole number from 1 to 4."];
+    }
+
+    return errors.Count == 0 ? null : Results.ValidationProblem(errors);
+}
+
+static IResult Conflict(ApiConflictException exception)
 {
     return Results.Problem(title: exception.Title, detail: exception.Message, statusCode: StatusCodes.Status409Conflict);
 }

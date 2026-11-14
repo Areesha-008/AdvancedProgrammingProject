@@ -9,10 +9,14 @@ namespace MarksApi.Services;
 public class StudentService : IStudentService
 {
     private readonly AppDbContext _db;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<StudentService> _logger;
 
-    public StudentService(AppDbContext db)
+    public StudentService(AppDbContext db, IConfiguration configuration, ILogger<StudentService> logger)
     {
         _db = db;
+        _configuration = configuration;
+        _logger = logger;
     }
 
     public async Task<PagedResult<StudentResponse>> ListAsync(int page, int pageSize, string? search, string? sort, CancellationToken cancellationToken)
@@ -95,6 +99,7 @@ public class StudentService : IStudentService
         };
         _db.Students.Add(student);
         await SaveAsync(cancellationToken);
+        _logger.LogInformation("Created student {StudentId}", student.Id);
         return ToResponse(student);
     }
 
@@ -110,6 +115,7 @@ public class StudentService : IStudentService
         student.FullName = request.FullName!.Trim();
         student.Email = request.Email!.Trim().ToLowerInvariant();
         await SaveAsync(cancellationToken);
+        _logger.LogInformation("Updated student {StudentId}", student.Id);
         return ToResponse(student);
     }
 
@@ -128,10 +134,54 @@ public class StudentService : IStudentService
         }
         catch (DbUpdateException exception) when (IsPostgres(exception, PostgresErrorCodes.ForeignKeyViolation))
         {
-            throw new StudentConflictException("Student has enrollments", "A student who is enrolled in a course cannot be deleted.");
+            throw new ApiConflictException("Student has enrollments", "A student who is enrolled in a course cannot be deleted.");
         }
 
+        _logger.LogInformation("Deleted student {StudentId}", id);
         return true;
+    }
+
+    public async Task<TranscriptResponse?> GetTranscriptAsync(int id, CancellationToken cancellationToken)
+    {
+        var student = await _db.Students.AsNoTracking()
+            .Where(row => row.Id == id)
+            .Select(row => new { row.Id, row.RegistrationNo, row.FullName })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (student is null)
+        {
+            return null;
+        }
+
+        var passMark = _configuration.GetValue("Marks:PassMark", 50);
+        var courses = await _db.Enrollments.AsNoTracking()
+            .Where(enrollment => enrollment.StudentId == id)
+            .OrderBy(enrollment => enrollment.Course.Code)
+            .Select(enrollment => new TranscriptCourse
+            {
+                Code = enrollment.Course.Code,
+                CreditHours = enrollment.Course.CreditHours,
+                Mark = enrollment.Mark
+            })
+            .ToListAsync(cancellationToken);
+
+        foreach (var course in courses)
+        {
+            course.Passed = course.Mark is int mark && mark >= passMark;
+        }
+
+        var graded = courses.Where(course => course.Mark is not null).ToList();
+        double? weightedAverage = graded.Count == 0
+            ? null
+            : graded.Sum(course => course.Mark!.Value * course.CreditHours) / (double)graded.Sum(course => course.CreditHours);
+
+        return new TranscriptResponse
+        {
+            StudentId = student.Id,
+            RegistrationNo = student.RegistrationNo,
+            FullName = student.FullName,
+            Courses = courses,
+            WeightedAverage = weightedAverage
+        };
     }
 
     private async Task SaveAsync(CancellationToken cancellationToken)
@@ -142,7 +192,7 @@ public class StudentService : IStudentService
         }
         catch (DbUpdateException exception) when (IsPostgres(exception, PostgresErrorCodes.UniqueViolation))
         {
-            throw new StudentConflictException("Duplicate student", "A student with this registration number or email already exists.");
+            throw new ApiConflictException("Duplicate student", "A student with this registration number or email already exists.");
         }
     }
 
@@ -163,13 +213,21 @@ public class StudentService : IStudentService
     }
 }
 
-public class StudentConflictException : Exception
+public class ApiConflictException : Exception
 {
-    public StudentConflictException(string title, string detail)
+    public ApiConflictException(string title, string detail)
         : base(detail)
     {
         Title = title;
     }
 
     public string Title { get; }
+}
+
+public class ApiNotFoundException : Exception
+{
+    public ApiNotFoundException(string detail)
+        : base(detail)
+    {
+    }
 }
